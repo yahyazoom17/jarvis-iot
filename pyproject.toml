@@ -1,0 +1,25 @@
+[project]
+name = "jarvis-iot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "yahya", email = "yahyafreelance1727@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "cactus-needle[mic]>=3.2.8",
+    "elevenlabs>=2.74.1",
+    "fastapi[standard]>=0.162.0",
+    "langgraph>=1.2.18",
+    "litellm>=1.106.4",
+    "python-dotenv>=1.2.4",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+jarvis-iot = "jarvis_iot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
