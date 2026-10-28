@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from dotenv import load_dotenv
+from jarvis_iot.schemas.QuerySchema import UserQuery
 
 load_dotenv()  # Load environment variables from .env file
 
-from jarvis_iot.agent import agent
-from jarvis_iot.schemas.QuerySchema import UserQuery
+from jarvis_iot.utils import invoke_jarvis
 
 app = FastAPI(
     title="Jarvis IoT Server",
@@ -42,7 +42,7 @@ async def check_jarvis():
 
 @app.post("/jarvis/ask")
 async def ask_jarvis(user_query: UserQuery):
-    result = agent.run(user_query.query)
+    result = invoke_jarvis(user_query.query)
     return {
         "status": "success",
         "status_code": 200,

@@ -1,46 +1,26 @@
-import needle
-from elevenlabs.client import ElevenLabs
-import os
-from dotenv import load_dotenv
+from jarvis_iot.jarvis import transcribe_audio, jarvis_agent
+from jarvis_iot.llm import get_jarvis_response
+from jarvis_iot.speech_synthesis import generate_speech
 
-load_dotenv()  # Load environment variables from .env file
-
-elevenlabs_client = ElevenLabs(
-    api_key=os.getenv("ELEVENLABS_API_KEY")
-)
-
-def transcribe_audio(file_path: str) -> dict:
+def invoke_jarvis(command: str):
     """
-    Transcribes the audio from the given file path using the Needle library.
-
-    Args:
-        file_path (str): The path to the audio file to be transcribed.
+    Invokes the Jarvis agent to process user input and generate a response.
 
     Returns:
-        dict: The transcribed text and other metadata.
+        dict: The response from the Jarvis agent.
     """
-    return needle.transcribe(file_path)
+    transcription = transcribe_audio("response.wav")  # Transcribe the audio file (if needed)    
+    
+    print(f"[WHISTLE] {transcription["text"]}")    
 
-def generate_speech(text:str):
-    """
-    Generates speech from the given text using the ElevenLabs API.
+    agent_response = jarvis_agent.run(command)["results"]  # Run the Jarvis agent with the command
 
-    Args:
-        text (str): The text to be converted to speech.
-    Returns:
-        str: The path to the generated audio file.
-    """
-    audio = elevenlabs_client.text_to_speech.convert(
-        text=text,
-        voice_id="EXAVITQu4vr4xnSDxMaL",
-        model_id="eleven_multilingual_v2",
-        output_format="wav_22050",
-    )
+    print(f"[NEEDLE] {agent_response}")
 
-    with open("response.wav", "wb") as file:
-        for chunk in audio:
-            file.write(chunk)
+    # Get response from Jarvis LLM
+    llm_response = get_jarvis_response(str(agent_response))
 
-    print("Jarvis response saved as response.wav")
+    # Generate speech from the response
+    speech_file_path = generate_speech(llm_response['content'])
 
-generate_speech("Hello, I am Jarvis, your personal AI assistant. How can I help you today?")
+    return llm_response
