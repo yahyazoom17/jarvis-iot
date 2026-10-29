@@ -23,7 +23,7 @@ const char* WIFI_PASSWORD = "taj@1727";
 const char* WS_HOST = "192.168.0.111";
 const uint16_t WS_PORT = 8000;
 const char* WS_PATH = "/ws";
-const char* SERVER_BASE_URL = "http://192.168.0.111:8000";
+const char* SERVER_BASE_URL = "http://192.168.0.111:8000"; // Change to https://yahyazzzz-jarvis-iot.hf.space
 
 // ---------- Pins ----------
 static constexpr int MIC_I2S_SD = 16;
