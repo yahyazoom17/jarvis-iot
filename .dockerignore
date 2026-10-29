@@ -1,0 +1,38 @@
+# VCS / editor
+.git
+.gitignore
+.vscode/
+.idea/
+
+# Secrets -- never bake keys into an image layer
+.env
+.env.*
+*.pem
+*.key
+
+# Python build and virtualenv artifacts
+# NOTE: Docker matches with Go's filepath.Match, where * does not cross a "/".
+# Every pattern that should recurse therefore needs an explicit **/ prefix.
+.venv
+**/__pycache__/
+**/*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.cache
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Audio is regenerated inside the container; the 3 MB test fixture is not used
+# at runtime. Remove this line to ship harvard.wav with the image.
+**/*.wav
+
+# Docker plumbing itself
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# NOT ignored -- required to build:
+#   pyproject.toml, uv.lock, README.md (readme=), src/, scripts/

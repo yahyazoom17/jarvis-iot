@@ -1,0 +1,46 @@
+# Optional convenience stack: the Jarvis API plus a local Ollama server.
+#
+#   cp env-example .env                      # set ELEVENLABS_API_KEY
+#   docker compose up --build
+#   docker compose exec ollama ollama pull llama3.2:1b
+#
+# Then http://localhost:8000
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  jarvis:
+    build:
+      context: .
+      # Optional -- only needed to raise the Hugging Face rate limit while the
+      # image pre-downloads the Needle engine. The repos are public.
+      # secrets:
+      #   - hf_token
+    image: jarvis-iot:latest
+    ports:
+      - "8000:8000"
+    environment:
+      # On the compose network the model server is the `ollama` service above.
+      # Outside compose, use http://host.docker.internal:11434 (or your host IP).
+      OLLAMA_API_BASE: http://ollama:11434
+      OLLAMA_MODEL: ollama/llama3.2:1b
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:?set ELEVENLABS_API_KEY in .env}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
