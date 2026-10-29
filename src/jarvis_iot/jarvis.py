@@ -24,6 +24,15 @@ def get_weather(city: str) -> dict:
     }
 
 @needle.tool
+def evaluate_maths(expression: str) -> dict:
+    "Evaluate a mathematical expression."
+    try:
+        result = eval(expression)
+        return {"expression": expression, "result": result}
+    except Exception as e:
+        return {"expression": expression, "error": str(e)}
+
+@needle.tool
 def get_time() -> dict:
     "Get the current time."
     return {
@@ -31,4 +40,4 @@ def get_time() -> dict:
         "current_date": datetime.datetime.now().strftime("%d-%m-%Y")
     }
 
-jarvis_agent = needle.Needle(tools=[get_weather, get_time])
+jarvis_agent = needle.Needle(tools=[get_weather, evaluate_maths, get_time])
