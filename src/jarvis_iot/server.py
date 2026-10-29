@@ -1,53 +1,86 @@
-from fastapi import FastAPI
-from dotenv import load_dotenv
-from jarvis_iot.schemas.QuerySchema import UserQuery
+import json
+import logging
+from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import FileResponse
+from jarvis_iot.utils import save_mic_audio_to_file, invoke_jarvis
 
-load_dotenv()  # Load environment variables from .env file
+app = FastAPI(title="JARVIS Websockets Server")
 
-from jarvis_iot.utils import invoke_jarvis
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("jarvis")
 
-app = FastAPI(
-    title="Jarvis IoT Server",
-    description="This is the server for the Jarvis IoT project.",
-    version="0.1.0"
-)
+TEMP_DIR = Path("temp")
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Home routes
+SAMPLE_RATE = 16000
+CHANNELS = 1
+SAMPLE_WIDTH = 2  # 16-bit PCM
+
+clients: list[WebSocket] = []
 
 @app.get("/")
-async def home():
+async def root():
     return {
-        "status": "success",
-        "status_code": 200,
-        "message": "Welcome to the Jarvis IoT Server!"
+        "status": "running",
+        "websocket": "/ws",
+        "audio_format": "pcm_s16le",
+        "sample_rate": SAMPLE_RATE,
+        "duration_limit": None,
     }
 
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "success",
-        "status_code": 200,
-        "message": "Server is healthy!"
-    }
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    print(f"[WS] Client connected")
+    clients.append(ws)
+    print("[WS] Clients connected:", len(clients))
+    audio_buffer = bytearray()
+    recording = False
 
-# Agent routes
+    try:
+        while True:
+            message = await ws.receive()
+            # ==================================================
+            # JSON / TEXT
+            # ==================================================
+            if message.get("text") is not None:
+                data = message["text"]
+                try:
+                    msg = json.loads(data)
+                except json.JSONDecodeError:
+                    print("[WS] Invalid JSON:", data)
+                    continue
+                message_type = msg.get("type")
 
-@app.post("/jarvis")
-async def check_jarvis():
-    return {
-        "status": "success",
-        "status_code": 200,
-        "message": "Jarvis is ready to answer your questions!"
-    }
+                # ==============================================
+                # AUDIO START
+                # ==============================================
 
-@app.post("/jarvis/ask")
-async def ask_jarvis(user_query: UserQuery):
-    result = invoke_jarvis(user_query.query)
-    return {
-        "status": "success",
-        "status_code": 200,
-        "message": result
-    }
+                if message_type == "audio_start":
+                    print("[WS] >>> AUDIO START")
+                    print("Sample rate:", msg.get("sample_rate"))
+                    print("Channels:", msg.get("channels"))
+                    print("Bits:", msg.get("bits"))
+                    print("Encoding:",msg.get("encoding"))
+                    audio_buffer.clear()
+                    recording = True
+
+                # ==============================================
+                # AUDIO END
+                # ==============================================
+
+                elif message_type == "audio_end":
+                    print("[WS] >>> AUDIO END")
+                    recording = False
+                    print("[WS] Total audio:", len(audio_buffer), "bytes")
+                    # Save PCM for testing
+                    save_mic_audio_to_file(audio_buffer, "received_audio.wav")
+                    print("[WS] Audio saved")
+    except WebSocketDisconnect:
+        print("[WS] Client disconnected")
+        clients.remove(ws)
+        print("[WS] Clients connected:", len(clients))
 
 if __name__ == "__main__":
     import uvicorn

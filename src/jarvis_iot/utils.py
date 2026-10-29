@@ -1,6 +1,16 @@
+from pathlib import Path
 from jarvis_iot.jarvis import transcribe_audio, jarvis_agent
 from jarvis_iot.llm import get_jarvis_response
 from jarvis_iot.speech_synthesis import generate_speech
+import wave
+
+def save_mic_audio_to_file(audio_buffer: bytes, filename: str) -> Path:
+    with wave.open(filename, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(audio_buffer)
+    return Path(filename)
 
 def invoke_jarvis(command: str):
     """

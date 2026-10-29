@@ -15,6 +15,7 @@ dependencies = [
     "litellm>=1.106.4",
     "python-dotenv>=1.2.4",
     "uvicorn>=0.54.0",
+    "websockets>=17.3",
 ]
 
 [project.scripts]

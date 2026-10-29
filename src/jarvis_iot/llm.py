@@ -27,7 +27,7 @@ def get_jarvis_response(user_input: str, tool_results: str) -> dict:
     # endpoint is configurable. Point OLLAMA_API_BASE at the host (or at the
     # ollama service in docker-compose.yml) when running containerized.
     response = completion(
-        model=os.getenv("OLLAMA_MODEL", "ollama/llama3.2:1b"),
+        model=os.getenv("OLLAMA_MODEL", "ollama/gemma4:e2b"),
         api_base=os.getenv("OLLAMA_API_BASE", "http://localhost:11434"),
         messages=messages,
         max_completion_tokens=20,

@@ -1180,6 +1180,7 @@ dependencies = [
     { name = "litellm" },
     { name = "python-dotenv" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -1191,6 +1192,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.106.4" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
     { name = "uvicorn", specifier = ">=0.54.0" },
+    { name = "websockets", specifier = ">=17.3" },
 ]
 
 [[package]]
