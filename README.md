@@ -128,7 +128,8 @@ curl http://localhost:8000/health
 docker build -t jarvis-iot .
 
 docker run --rm -p 8000:8000 \
-  -e ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" \
+  -e ELEVENLABS_API_KEY="$your elevenlabs api key" \
+  -e HF_TOKEN="$your hf token" \
   -e OLLAMA_API_BASE=http://host.docker.internal:11434 \
   jarvis-iot
 ```
