@@ -1,3 +1,8 @@
+/*
+  JARVIS ESP32-S3 — stable push-to-talk audio streaming
+  [FIXED: Added FreeRTOS Queue to prevent choppy audio / dropped frames]
+*/
+
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
@@ -6,566 +11,364 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
-// =========================
-// WiFi configuration
-// =========================
+// ---------- Wi-Fi / server ----------
 const char* WIFI_SSID = "Yahya";
 const char* WIFI_PASSWORD = "taj@1727";
 
-// =========================
-// FastAPI WebSocket server
-// =========================
-// IMPORTANT:
-// Use your computer's LAN IP, NOT localhost.
-//
-// Example:
-// ws://192.168.1.100:8000/ws
-//
-const char* WS_HOST = "192.168.0.103";
-const char* SERVER_HOST = "http://192.168.0.103:8000";
+// Set this to the LAN IP of the computer running FastAPI.
+const char* WS_HOST = "192.168.0.111";
 const uint16_t WS_PORT = 8000;
 const char* WS_PATH = "/ws";
+const char* SERVER_BASE_URL = "http://192.168.0.111:8000";
+
+// ---------- Pins ----------
+static constexpr int MIC_I2S_SD = 16;
+static constexpr int MIC_I2S_SCK = 17;
+static constexpr int MIC_I2S_WS = 18;
+
+static constexpr int SPK_I2S_BCLK = 12;
+static constexpr int SPK_I2S_LRC = 13;
+static constexpr int SPK_I2S_DOUT = 11;
+
+static constexpr int BUTTON_PIN = 2;  // button connects GPIO2 to GND
+static constexpr int OLED_SDA = 8;
+static constexpr int OLED_SCL = 9;
+
+static constexpr uint32_t SAMPLE_RATE = 16000;
+static constexpr size_t SAMPLES_PER_CHUNK = 1024; // 2048 bytes PCM per frame
+static constexpr uint32_t BUTTON_DEBOUNCE_MS = 35;
+
+// ---------- FreeRTOS Queue ----------
+// 20 chunks buffers ~320ms of audio, safely riding out Wi-Fi stutters
+static constexpr size_t QUEUE_MAX_CHUNKS = 10; 
+QueueHandle_t audioQueue;
 
 WebSocketsClient webSocket;
-
-// Send JSON every 5 seconds
-unsigned long lastSendTime = 0;
-const unsigned long SEND_INTERVAL = 3000;
-
-// Push Button
-#define BUTTON_PIN 2
-
-bool isRecording = false;
-
-// ============================================================
-// INMP441 -> ESP32-S3 GPIO
-// ============================================================
-
-#define MIC_I2S_SD   16
-#define MIC_I2S_SCK  17
-#define MIC_I2S_WS   18
-#define SAMPLE_RATE 16000
-#define SAMPLE_BITS 16
-#define CHANNELS 1
-
-I2SClass I2S;
-
-// =========================
-// Audio buffer
-// =========================
-
-#define BUFFER_SAMPLES 512
-int32_t rawBuffer[BUFFER_SAMPLES];
-int16_t pcmBuffer[BUFFER_SAMPLES];
-
-// ============================================================
-// ESP32-S3 -> MAX98357A I2S pins
-// ============================================================
-
-#define I2S_BCLK 12
-#define I2S_LRC  13
-#define I2S_DOUT 11
-
+I2SClass micI2S;
 Audio audio;
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
-// OLED PIN CONFIG
-
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-
-#define OLED_SDA 8
-#define OLED_SCL 9
-
-Adafruit_SSD1306 display(
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
-    &Wire,
-    -1
-);
-
-void resetDisplay() {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(2);
-    display.setCursor(1, 20);
-    display.println("JARVIS v2.0");
-    display.display();
-    delay(3000);
-}
-
-// ============================================================
-// Music/Song streaming
-// ============================================================
-
-enum AudioState {
-    AUDIO_IDLE,
-    AUDIO_PLAYING_AI,
-    AUDIO_PLAYING_TRACK
-};
-
-AudioState audioState = AUDIO_IDLE;
+enum class AudioState : uint8_t { IDLE, PLAYING_AI, PLAYING_TRACK };
+AudioState audioState = AudioState::IDLE;
 String pendingTrackUrl;
 
-void playAudioUrl(const String& url) {
+volatile bool wsConnected = false;
+volatile bool isRecording = false;
+bool oledReady = false;
+bool lastRawButton = HIGH;
+bool stableButton = HIGH;
+uint32_t lastButtonChangeMs = 0;
+uint32_t lastStatusMs = 0;
 
-    Serial.println();
-    Serial.println("================================");
-    Serial.println("Starting audio");
-    Serial.println("URL:");
-    Serial.println(url);
-    Serial.println("================================");
-
-    // stop previous stream
-    audio.stopSong();
-
-    // Start new stream
-    audio.connecttohost(url.c_str());
+// ---------- Display ----------
+void showMessage(const String& line1, const String& line2 = "") {
+  if (!oledReady) return;
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(line1);
+  if (line2.length()) display.println(line2);
+  display.display();
 }
 
-// This callback handles smooth transiton from AI voice to audio track
-void audio_eof_mp3(const char *info) {
-    Serial.println("[AUDIO] MP3 finished");
+// ---------- WebSocket JSON ----------
+void sendControlMessage(const char* type) {
+  if (!wsConnected) return;
 
-    if (audioState == AUDIO_PLAYING_AI) {
-        Serial.println("[AUDIO] AI lead finished");
-        Serial.println("[AUDIO] Starting track...");
+  JsonDocument doc;
+  doc["type"] = type;
 
-        audioState = AUDIO_PLAYING_TRACK;
-        playAudioUrl(pendingTrackUrl);
-    }
-    else if (audioState == AUDIO_PLAYING_TRACK) {
-        Serial.println("[AUDIO] Track finished");
-
-        audioState = AUDIO_IDLE;
-    }
-}
-
-// =========================
-// Setup microphone
-// =========================
-
-void setupMic()
-{
-    I2S.setPins(
-        MIC_I2S_SCK,
-        MIC_I2S_WS,
-        -1,
-        MIC_I2S_SD,
-        -1
-    );
-
-    bool ok = I2S.begin(
-        I2S_MODE_STD,
-        SAMPLE_RATE,
-        I2S_DATA_BIT_WIDTH_32BIT,
-        I2S_SLOT_MODE_MONO,
-        I2S_STD_SLOT_LEFT
-    );
-
-    if (!ok) {
-        Serial.println(
-            "[I2S] Failed to initialize"
-        );
-
-        while (true) {
-            delay(1000);
-        }
-    }
-
-    Serial.println(
-        "[I2S] INMP441 initialized"
-    );
-}
-
-// ============================================================
-// Send audio_start
-// ============================================================
-
-void sendAudioStart()
-{
-    if (!webSocket.isConnected()) {
-        return;
-    }
-
-    JsonDocument doc;
-
-    doc["type"] = "audio_start";
+  if (strcmp(type, "audio_start") == 0) {
     doc["sample_rate"] = SAMPLE_RATE;
-    doc["channels"] = CHANNELS;
-    doc["bits"] = SAMPLE_BITS;
+    doc["channels"] = 1;
+    doc["bits"] = 16;
     doc["encoding"] = "pcm_s16le";
+  }
 
-    String json;
-    serializeJson(doc, json);
-
-    webSocket.sendTXT(json);
-
-    Serial.println("[WS] >>> AUDIO START");
+  String json;
+  serializeJson(doc, json);
+  webSocket.sendTXT(json);
 }
 
-
-// ============================================================
-// Send audio_end
-// ============================================================
-
-void sendAudioEnd()
-{
-    if (!webSocket.isConnected()) {
-        return;
-    }
-
-    JsonDocument doc;
-
-    doc["type"] = "audio_end";
-
-    String json;
-    serializeJson(doc, json);
-
-    webSocket.sendTXT(json);
-
-    Serial.println("[WS] >>> AUDIO END");
+void sendHandshake() {
+  if (!wsConnected) return;
+  JsonDocument doc;
+  doc["type"] = "handshake";
+  doc["device_id"] = "jarvis-esp32-s3";
+  doc["status"] = "online";
+  String json;
+  serializeJson(doc, json);
+  webSocket.sendTXT(json);
 }
 
-
-// ============================================================
-// Start recording
-// ============================================================
-
-void startRecording()
-{
-    if (isRecording) {
-        return;
-    }
-
-
-    if (!webSocket.isConnected()) {
-        Serial.println("[MIC] WebSocket not connected");
-        return;
-    }
-
-    Serial.println();
-    Serial.println("==============================");
-    Serial.println("[MIC] RECORDING STARTED");
-    Serial.println("==============================");
-
-    sendAudioStart();
-
-    isRecording = true;
+// ---------- Microphone & FreeRTOS Task ----------
+bool setupMic() {
+  micI2S.setPins(MIC_I2S_SCK, MIC_I2S_WS, -1, MIC_I2S_SD, -1);
+  return micI2S.begin(
+    I2S_MODE_STD,
+    SAMPLE_RATE,
+    I2S_DATA_BIT_WIDTH_32BIT,
+    I2S_SLOT_MODE_MONO,
+    I2S_STD_SLOT_LEFT
+  );
 }
 
-
-// ============================================================
-// Stop recording
-// ============================================================
-
-void stopRecording()
-{
+// Dedicated background task to read mic seamlessly
+void micTask(void *pvParameters) {
+  int32_t rawSamples[SAMPLES_PER_CHUNK];
+  int16_t pcmSamples[SAMPLES_PER_CHUNK];
+  
+  while (true) {
     if (!isRecording) {
-        return;
+      vTaskDelay(pdMS_TO_TICKS(20)); // Rest when idle
+      continue;
     }
-
-    Serial.println();
-    Serial.println("==============================");
-    Serial.println("[MIC] RECORDING STOPPED");
-    Serial.println("==============================");
-
-    sendAudioEnd();
-
-    isRecording = false;
-}
-
-
-// ============================================================
-// Handle push button
-// ============================================================
-
-void handleButton()
-{
-    // INPUT_PULLUP:
-    //
-    // Not pressed = HIGH
-    // Pressed     = LOW
-
-    bool buttonPressed =
-        digitalRead(BUTTON_PIN) == LOW;
-
-
-    // Button pressed
-    if (buttonPressed && !isRecording) {
-
-        startRecording();
-    }
-
-
-    // Button released
-    if (!buttonPressed && isRecording) {
-
-        stopRecording();
-    }
-}
-
-// =========================
-// Send microphone audio
-// =========================
-
-void sendMicrophoneAudio()
-{
-    size_t bytesRead = I2S.readBytes(
-        (char*)rawBuffer,
-        sizeof(rawBuffer)
+    
+    // Blocks safely until requested data is ready, isolated from Wi-Fi lag
+    size_t bytesRead = micI2S.readBytes(
+      reinterpret_cast<char*>(rawSamples),
+      sizeof(rawSamples)
     );
 
-    if (bytesRead == 0) {
-        return;
+    if (bytesRead == sizeof(rawSamples)) {
+      for (size_t i = 0; i < SAMPLES_PER_CHUNK; ++i) {
+        // INMP441 emits 24-bit data. Shift right by 14 adds digital gain.
+        int32_t sample = rawSamples[i] >> 14;
+        
+        // Prevent audio distortion/clipping
+        if (sample > 32767) sample = 32767;
+        if (sample < -32768) sample = -32768;
+        pcmSamples[i] = static_cast<int16_t>(sample);
+      }
+      
+      // Push to queue, wait up to 10ms if queue is temporarily full
+      xQueueSend(audioQueue, pcmSamples, pdMS_TO_TICKS(10));
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(1)); 
     }
-
-    size_t samplesRead = bytesRead / sizeof(int32_t);
-
-    // Convert 32-bit I2S samples
-    // to 16-bit PCM
-
-    for (size_t i = 0; i < samplesRead; i++) {
-        pcmBuffer[i] = (int16_t)(rawBuffer[i] >> 14);
-    }
-
-    size_t pcmBytes = samplesRead * sizeof(int16_t);
-
-    if (webSocket.isConnected()) {
-        webSocket.sendBIN((uint8_t*)pcmBuffer, pcmBytes);
-    }
+  }
 }
 
-// =========================
-// Send JSON to FastAPI
-// =========================
-void sendJson() {
+void startRecording() {
+  if (isRecording) return;
+  if (!wsConnected) {
+    Serial.println("[MIC] Cannot record: WebSocket is disconnected");
+    showMessage("JARVIS", "Server disconnected");
+    return;
+  }
 
-    // Create JSON document
-    JsonDocument doc;
-
-    doc["device_id"] = "jarvis-#001";
-    doc["health"] = "ok";
-    doc["wifi"] = WiFi.RSSI();
-    doc["status"] = "online";
-    doc["type"] = "handshake";
-    doc["message"] = "Hello! this is Jarvis-ESP32";
-
-    // Example nested object
-    JsonObject location = doc["location"].to<JsonObject>();
-    location["lat"] = 12.9716;
-    location["lng"] = 77.5946;
-
-    // Convert JSON to String
-    String json;
-
-    serializeJson(doc, json);
-
-    Serial.print("[WS] Sending: ");
-    Serial.println(json);
-
-    // Send JSON over WebSocket
-    webSocket.sendTXT(json);
+  isRecording = true;
+  sendControlMessage("audio_start");
+  Serial.println("[MIC] RECORDING STARTED");
+  showMessage("JARVIS", "Listening...");
 }
 
-// =========================
-// WebSocket event handler
-// =========================
-void webSocketEvent(
-    WStype_t type,
-    uint8_t* payload,
-    size_t length
-) {
-    switch (type) {
+void stopRecording() {
+  if (!isRecording) return;
+  
+  // 1. Tell the background micTask to stop recording new audio
+  isRecording = false;
 
-        case WStype_DISCONNECTED:
-            Serial.println("[WS] Disconnected");
-            break;
+  // 2. Wait just a moment to let micTask finish its current I2S read
+  // and push the very last chunk of audio into the queue.
+  delay(30); 
 
-        case WStype_CONNECTED: {
-            Serial.println("[WS] Connected to Jarvis Server");
-            // Send an initial message
-            // sendJson();
-            break;
+  // 3. CRITICAL FIX: Drain all remaining audio chunks from the queue 
+  // and send them to the server BEFORE we send the "audio_end" signal.
+  int16_t pcmSamples[SAMPLES_PER_CHUNK];
+  while (xQueueReceive(audioQueue, pcmSamples, 0) == pdTRUE) {
+    webSocket.sendBIN(
+      reinterpret_cast<uint8_t*>(pcmSamples),
+      sizeof(pcmSamples)
+    );
+  }
+
+  // 4. Now that the queue is safely sent, tell the server we are done.
+  sendControlMessage("audio_end");
+  Serial.println("[MIC] RECORDING STOPPED (Queue flushed)");
+  showMessage("JARVIS", "Audio sent");
+}
+
+void streamMicrophoneChunk() {
+  if (!isRecording || !wsConnected) {
+    // Keep the queue clean of stale data when we are NOT recording.
+    // We don't have to worry about losing good audio here anymore, 
+    // because stopRecording() already safely sent it.
+    int16_t dummy[SAMPLES_PER_CHUNK];
+    while (uxQueueMessagesWaiting(audioQueue) > 0) {
+      xQueueReceive(audioQueue, dummy, 0);
+    }
+    return;
+  }
+
+  int16_t pcmSamples[SAMPLES_PER_CHUNK];
+  
+  // During normal recording, send chunks as fast as the network allows
+  while (xQueueReceive(audioQueue, pcmSamples, 0) == pdTRUE) {
+    webSocket.sendBIN(
+      reinterpret_cast<uint8_t*>(pcmSamples),
+      sizeof(pcmSamples)
+    );
+  }
+}
+
+// ---------- Audio playback ----------
+void playAudioUrl(const String& url) {
+  Serial.printf("[AUDIO] Starting URL: %s\n", url.c_str());
+  audio.stopSong();
+  audio.connecttohost(url.c_str());
+}
+
+void audio_eof_mp3(const char* info) {
+  Serial.println("[AUDIO] Stream finished");
+  if (audioState == AudioState::PLAYING_AI && pendingTrackUrl.length()) {
+    audioState = AudioState::PLAYING_TRACK;
+    playAudioUrl(pendingTrackUrl);
+  } else {
+    audioState = AudioState::IDLE;
+  }
+}
+
+// ---------- Incoming WebSocket messages ----------
+void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      wsConnected = false;
+      if (isRecording) {
+        isRecording = false;
+        Serial.println("[WS] Disconnected during recording; recording stopped");
+      }
+      Serial.println("[WS] Disconnected");
+      showMessage("JARVIS", "Disconnected");
+      break;
+
+    case WStype_CONNECTED:
+      wsConnected = true;
+      Serial.println("[WS] Connected to JARVIS server");
+      showMessage("JARVIS", "Server connected");
+      sendHandshake();
+      break;
+
+    case WStype_TEXT: {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, payload, length);
+      if (err) return;
+
+      const char* status = doc["status"] | "";
+      const char* service = doc["service"] | "";
+
+      if (strcmp(service, "audio") == 0) {
+        const char* url = doc["audio_url"] | "";
+        if (*url) playAudioUrl(String(url));
+      } else if (strcmp(service, "jarvis_response") == 0) {
+        const char* responseUrl = doc["response_url"] | "";
+        if (*responseUrl) {
+          String fullUrl = responseUrl;
+          if (!fullUrl.startsWith("http")) {
+            fullUrl = String(SERVER_BASE_URL) + responseUrl;
+          }
+          playAudioUrl(fullUrl);
         }
-
-        case WStype_TEXT: {
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, payload, length);
-
-            if (error) {
-                Serial.print("JSON error: ");
-                Serial.println(error.c_str());
-                return;
-            }
-            const char* status = doc["status"];
-            Serial.print("Status: ");
-            Serial.println(status);
-
-            const char* service = doc["service"];
-            // Logic for Music/Song player service
-            if(strcmp(service, "audio") == 0) {
-                Serial.println("----- AUDIO SERVICE STARTED -----");
-                const char* audioUrl = doc["audio_url"];
-                const char* audioTitle = doc["audio_title"];
-                if (audioUrl == nullptr) {
-                Serial.println("[JSON] No Audio URL found");
-                return;
-                }
-                Serial.print("NOW PLAYING: ");
-                Serial.println(audioTitle);
-                playAudioUrl(audioUrl);
-                break;
-            }
-            // Logic for Jarvis AI service
-            else if (strcmp(service, "jarvis_response") == 0) {
-                Serial.println("----- JARVIS SERVICE STARTED -----");
-                if (doc["is_audio"] == true) {
-                    display.clearDisplay();
-                    display.setCursor(10, 20);
-                    display.setTextSize(1);
-                    display.setTextColor(SSD1306_WHITE);
-                    display.println("Playing song on JARVIS speaker...");
-                    display.display();
-                }
-                const char* responseUrl = doc["response_url"];
-                const char* responseText = doc["response_text"];
-                if (responseUrl == nullptr) {
-                Serial.println("[JSON] No response URL found");
-                return;
-                }
-                Serial.print("JARVIS RESPONSE: ");
-                Serial.println(responseText);
-                String audioUrl = String(SERVER_HOST) + responseUrl;
-                playAudioUrl(audioUrl);
-                break;
-            }
-            else if (strcmp(service, "text_stream") == 0) {
-                display.clearDisplay();
-                display.setCursor(10, 20);
-                display.setTextSize(1);
-                display.setTextColor(SSD1306_WHITE);
-                Serial.println("----- STREAMING RESPONSE -----");
-                const char* responseWord = doc["text"];
-                if (responseWord == nullptr) {
-                Serial.println("[JSON] No text found");
-                return;
-                }
-                 // Redraw OLED
-                display.println(responseWord);
-                display.display();
-                break;
-            }
-            resetDisplay();
-            break;
-        }
-        case WStype_BIN:
-            Serial.println("[WS] Received binary data");
-            break;
-        case WStype_ERROR:
-            Serial.println("[WS] Error");
-            break;
-        default:
-            break;
+        const char* responseText = doc["response_text"] | "";
+        showMessage("JARVIS", String(responseText).substring(0, 20));
+      } else if (strcmp(service, "text_stream") == 0) {
+        const char* responseText = doc["text"] | "";
+        showMessage("JARVIS", String(responseText).substring(0, 40));
+      } else if (strcmp(status, "audio_saved") == 0) {
+        Serial.printf("[WS] Audio saved: %lu bytes\n", (unsigned long)(doc["bytes"] | 0));
+      } else if (strcmp(status, "error") == 0) {
+        const char* errorText = doc["message"] | "Server error";
+        Serial.printf("[SERVER] %s\n", errorText);
+      }
+      break;
     }
+    default: break;
+  }
 }
 
-
-// =========================
-// Connect to WiFi
-// =========================
+// ---------- Wi-Fi ----------
 void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false); // Reduce latency
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    Serial.print("Connecting to WiFi");
-
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-
-    Serial.println();
-    Serial.println("WiFi connected!");
-
-    Serial.print("ESP32 IP: ");
-    Serial.println(WiFi.localIP());
+  Serial.print("[WiFi] Connecting");
+  uint32_t started = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+    if (millis() - started > 30000) ESP.restart();
+  }
+  Serial.printf("\n[WiFi] Connected. ESP32 IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
-// =========================
-// Arduino setup
-// =========================
+// ---------- Setup / loop ----------
 void setup() {
+  Serial.begin(115200);
+  delay(500);
 
-    Serial.begin(115200);
-    delay(1000);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-    Serial.println();
-    Serial.println("Starting ESP32 WebSocket client...");
+  Wire.begin(OLED_SDA, OLED_SCL);
+  oledReady = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (oledReady) showMessage("JARVIS", "Booting...");
 
-    // OLED Setup
-    Wire.begin(OLED_SDA, OLED_SCL);
+  // Initialize FreeRTOS Queue for buffering mic audio safely
+  audioQueue = xQueueCreate(QUEUE_MAX_CHUNKS, SAMPLES_PER_CHUNK * sizeof(int16_t));
 
-    // Push button setup
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
+  if (!setupMic()) {
+    Serial.println("[I2S] Microphone initialization failed");
+    showMessage("JARVIS", "Mic init failed");
+    while (true) delay(1000);
+  }
+  
+  // Pin task to Core 0 (PRO_CORE) to balance CPU load with Arduino on Core 1
+  xTaskCreatePinnedToCore(micTask, "MicTask", 16384, NULL, 2, NULL, 0);
 
-    // Setup MIC
-    setupMic();
+  audio.setPinout(SPK_I2S_BCLK, SPK_I2S_LRC, SPK_I2S_DOUT);
+  audio.setVolume(20);
 
-    // Audio pin setup
-    audio.setPinout(
-        I2S_BCLK,
-        I2S_LRC,
-        I2S_DOUT
-    );
+  connectWiFi();
 
-    // set speaker volume
-    audio.setVolume(19);
+  webSocket.begin(WS_HOST, WS_PORT, WS_PATH);
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(10000);
+  // webSocket.enableHeartbeat(15000, 3000, 2);
 
-    // Connect WiFi
-    connectWiFi();
-
-    // Configure WebSocket
-    webSocket.begin(
-        WS_HOST,
-        WS_PORT,
-        WS_PATH
-    );
-
-    // Register event handler
-    webSocket.onEvent(webSocketEvent);
-
-    // Automatically reconnect
-    webSocket.setReconnectInterval(5000);
-
-    Serial.println("System ready");
-
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        Serial.println("SSD1306 not found");
-        while (true);
-    }
-
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(2);
-    display.setCursor(10, 20);
-    display.println("JARVIS v2.0");
-    display.display();
-    delay(3000);
+  Serial.println("[SYSTEM] Ready. Hold button to record.");
+  showMessage("JARVIS", "Ready - hold btn");
 }
 
-// =========================
-// Arduino loop
-// =========================
 void loop() {
-    // Keep WebSocket connection alive
-    webSocket.loop();
-    // Keep audio alive
-    audio.loop();
-    // Check push-to-talk button 
-    handleButton();
-    // Send microphone data ONLY while button is held 
-    if (isRecording && webSocket.isConnected()) { 
-        sendMicrophoneAudio(); 
-    }
+  webSocket.loop();
+  audio.loop();
+
+  bool rawButton = digitalRead(BUTTON_PIN);
+  if (rawButton != lastRawButton) {
+    lastRawButton = rawButton;
+    lastButtonChangeMs = millis();
+  }
+
+  if ((millis() - lastButtonChangeMs) >= BUTTON_DEBOUNCE_MS && rawButton != stableButton) {
+    stableButton = rawButton;
+    if (stableButton == LOW) startRecording();
+    else stopRecording();
+  }
+
+  // Drains the queue created by the micTask
+  streamMicrophoneChunk();
+
+  if (millis() - lastStatusMs >= 5000) {
+    lastStatusMs = millis();
+    Serial.printf("[SYSTEM] heap=%u ws=%s recording=%s\n",
+                  ESP.getFreeHeap(),
+                  wsConnected ? "connected" : "disconnected",
+                  isRecording ? "yes" : "no");
+  }
+  delay(1);
 }
