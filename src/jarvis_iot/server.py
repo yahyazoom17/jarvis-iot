@@ -4,7 +4,7 @@ import logging
 import wave
 from pathlib import Path
 from typing import Set
-from jarvis_iot.utils import invoke_jarvis
+from jarvis_iot.utils import invoke_jarvis, invoke_jarvis_text
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse
 from starlette.websockets import WebSocketState
@@ -159,6 +159,11 @@ async def websocket_endpoint(ws: WebSocket):
         logger.info("WebSocket disconnected gracefully")
     finally:
         audio_buffer.clear()
+
+@app.post("/ask")
+async def ask_jarvis(query: str):
+    respose = await invoke_jarvis_text(query)
+    print(respose)
 
 if __name__ == "__main__":
     import uvicorn
